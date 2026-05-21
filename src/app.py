@@ -5,10 +5,13 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
 import os
+import secrets
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -18,6 +21,28 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# Hardcoded teacher credentials (username -> password)
+TEACHER_CREDENTIALS = {
+    "teacher": "teacher123"
+}
+
+# Active session tokens (token -> username)
+active_tokens: dict[str, str] = {}
+
+security = HTTPBearer(auto_error=False)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def get_current_teacher(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Dependency that validates the bearer token and returns the username."""
+    if credentials is None or credentials.credentials not in active_tokens:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return active_tokens[credentials.credentials]
 
 # In-memory activity database
 activities = {
@@ -83,13 +108,31 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
+@app.post("/login")
+def login(body: LoginRequest):
+    """Authenticate a teacher and return a session token."""
+    if TEACHER_CREDENTIALS.get(body.username) != body.password:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = secrets.token_hex(32)
+    active_tokens[token] = body.username
+    return {"token": token, "username": body.username}
+
+
+@app.post("/logout")
+def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Invalidate the current session token."""
+    if credentials and credentials.credentials in active_tokens:
+        del active_tokens[credentials.credentials]
+    return {"message": "Logged out"}
+
+
 @app.get("/activities")
 def get_activities():
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, teacher: str = Depends(get_current_teacher)):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +154,7 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, teacher: str = Depends(get_current_teacher)):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
